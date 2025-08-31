@@ -1,17 +1,28 @@
 <?php
 /**
- * WordPress eXtended WP-Player
+ * WordPress eXtended WP-Player - PHP 8.2 Compatible Version (v2)
  */
 if ( !class_exists( 'wp_player_plugin' ) ){
-    $WP_PLAYER_VERSION = '2.6.1';
+    $WP_PLAYER_VERSION = '2.6.2';
     class wp_player_plugin {
+
+        private $options;
+        private $base_dir;
+        private $admin_dir;
+        private $netease;
+        private $xiami;
+        private $tencent;
+        private $baidu;
 
         function __construct() {
 
             // include Metaboxes
-            require_once('metaboxes.php');
-            if( !class_exists('Meting') ) {
-                require_once('Meting.php');
+            $plugin_dir = plugin_dir_path(__FILE__);
+            if (file_exists($plugin_dir . 'metaboxes.php')) {
+                require_once($plugin_dir . 'metaboxes.php');
+            }
+            if( !class_exists('Meting') && file_exists($plugin_dir . 'Meting.php') ) {
+                require_once($plugin_dir . 'Meting.php');
             }
 
             add_action( "admin_menu", array( $this, 'options_menu' ) );
@@ -32,31 +43,69 @@ if ( !class_exists( 'wp_player_plugin' ) ){
             $this->base_dir = WP_PLUGIN_URL.'/'. dirname( plugin_basename( dirname( __FILE__ ) ) ).'/';
             $this->admin_dir = site_url( '/wp-admin/options-general.php?page=player.php' );
 
-            $this->netease = new Meting('netease');
-            $this->xiami = new Meting('xiami');
-            $this->tencent = new Meting('tencent');
-            $this->baidu = new Meting('baidu');
+            // Initialize Meting objects only if class exists
+            if (class_exists('Meting')) {
+                $this->netease = new Meting('netease');
+                $this->xiami = new Meting('xiami');
+                $this->tencent = new Meting('tencent');
+                $this->baidu = new Meting('baidu');
 
-            $this->netease->format(true);
-            $this->xiami->format(true);
-            $this->tencent->format(true);
-            $this->baidu->format(true);
+                $this->netease->format(true);
+                $this->xiami->format(true);
+                $this->tencent->format(true);
+                $this->baidu->format(true);
+            }
         }
 
         /**
          * @desc  get actions
          * @param string $source
-         * @return Meting
+         * @return Meting|null
          */
         private function get_api($source = 'netease') {
-            switch ( $source ) {
-                case 'netease': $API = $this->netease; break;
-                case 'xiami': $API = $this->xiami; break;
-                case 'tencent': $API = $this->tencent; break;
-                case 'baidu': $API = $this->baidu; break;
-                default: $this->netease;
+            if (!class_exists('Meting')) {
+                return null;
             }
-            return $API;
+            
+            switch ( $source ) {
+                case 'netease': return $this->netease;
+                case 'xiami': return $this->xiami;
+                case 'tencent': return $this->tencent;
+                case 'baidu': return $this->baidu;
+                default: return $this->netease;
+            }
+        }
+
+        /**
+         * @desc Safe JSON decode with error handling
+         */
+        private function safe_json_decode($json_string, $assoc = false) {
+            if (empty($json_string)) {
+                return $assoc ? array() : null;
+            }
+            
+            $decoded = json_decode($json_string, $assoc);
+            
+            if (json_last_error() !== JSON_ERROR_NONE) {
+                error_log('JSON decode error: ' . json_last_error_msg());
+                return $assoc ? array() : null;
+            }
+            
+            return $decoded;
+        }
+
+        /**
+         * @desc Safe count function for PHP 8.2
+         */
+        private function safe_count($data) {
+            if (is_array($data)) {
+                return count($data);
+            } elseif (is_string($data) && !empty($data)) {
+                // If it's a JSON string, try to decode and count
+                $decoded = $this->safe_json_decode($data, true);
+                return is_array($decoded) ? count($decoded) : 0;
+            }
+            return 0;
         }
 
         /** @desc Get Netease Song
@@ -68,29 +117,40 @@ if ( !class_exists( 'wp_player_plugin' ) ){
          *  @URL: https://github.com/metowolf/Meting
          **/
         public function wp_player_actions() {
-            $id = $_POST['id'];
-            $type = $_POST['type'];
-            $nonce = $_SERVER['HTTP_NONCE'];
-            $source = $_POST['source'];
+            $id = isset($_POST['id']) ? sanitize_text_field($_POST['id']) : '';
+            $type = isset($_POST['type']) ? sanitize_text_field($_POST['type']) : '';
+            $nonce = isset($_SERVER['HTTP_NONCE']) ? sanitize_text_field($_SERVER['HTTP_NONCE']) : '';
+            $source = isset($_POST['source']) ? sanitize_text_field($_POST['source']) : '';
 
             if ( !wp_verify_nonce($nonce, "wp-player") || !function_exists('curl_init')) {
-                $JSON = array('status' =>  false, 'message' => '非法请求', data => array());
+                $JSON = array('status' =>  false, 'message' => '非法请求', 'data' => array());
             } else {
                 $API = $this->get_api($source);
-                switch ( $type ) {
-                    case 'song': $data = $API->song($id); break;
-                    case 'album': $data = $API->album($id); break;
-                    case 'artist': $data = $API->artist($id); break;
-                    case 'collect': $data = $API->playlist($id); break;
-                    default: $data = $API->song($id);
+                if ($API === null) {
+                    $JSON = array('status' => false, 'message' => 'API不可用', 'data' => array());
+                } else {
+                    try {
+                        switch ( $type ) {
+                            case 'song': $data = $API->song($id); break;
+                            case 'album': $data = $API->album($id); break;
+                            case 'artist': $data = $API->artist($id); break;
+                            case 'collect': $data = $API->playlist($id); break;
+                            default: $data = $API->song($id);
+                        }
+                        
+                        $count = $this->safe_count($data);
+                        $JSON = array(
+                            'status' =>  ($data && $count > 0) ? true : false,
+                            'message' =>  ($data && $count > 0) ? '获取成功' : '获取失败',
+                            'data' => array(
+                                'list' => ($data && $count > 0) ? $this->safe_json_decode($data) : array()
+                            )
+                        );
+                    } catch (Exception $e) {
+                        error_log('WP-Player API error: ' . $e->getMessage());
+                        $JSON = array('status' => false, 'message' => 'API调用失败', 'data' => array());
+                    }
                 }
-                $JSON = array(
-                    'status' =>  ($data && count($data) > 0) ? true : false,
-                    'message' =>  ($data && count($data) > 0) ? '获取成功' : '获取失败',
-                    'data' => array(
-                        'list' => ($data && count($data) > 0) ? json_decode($data) : array()
-                    )
-                );
             }
 
             header('Content-type: application/json');
@@ -102,27 +162,36 @@ if ( !class_exists( 'wp_player_plugin' ) ){
          * @name Get Song Info
          */
         public function wp_player_get_info() {
-            $id = $_POST['id'];
-            $pic_id = $_POST['pic_id'];
-            $url_id = $_POST['url_id'];
-            $lyric_id = $_POST['lyric_id'];
-            $nonce = $_SERVER['HTTP_NONCE'];
-            $source = $_POST['source'];
+            $id = isset($_POST['id']) ? sanitize_text_field($_POST['id']) : '';
+            $pic_id = isset($_POST['pic_id']) ? sanitize_text_field($_POST['pic_id']) : '';
+            $url_id = isset($_POST['url_id']) ? sanitize_text_field($_POST['url_id']) : '';
+            $lyric_id = isset($_POST['lyric_id']) ? sanitize_text_field($_POST['lyric_id']) : '';
+            $nonce = isset($_SERVER['HTTP_NONCE']) ? sanitize_text_field($_SERVER['HTTP_NONCE']) : '';
+            $source = isset($_POST['source']) ? sanitize_text_field($_POST['source']) : '';
 
             if ( !wp_verify_nonce($nonce, "wp-player") || !function_exists('curl_init')) {
-                $JSON = array('status' =>  false, 'message' => '非法请求', data => array());
+                $JSON = array('status' =>  false, 'message' => '非法请求', 'data' => array());
             } else {
                 $API = $this->get_api($source);
-                $JSON = array(
-                    'status' =>  true,
-                    'message' =>  '获取成功',
-                    'data' => array(
-                        'id' => $id,
-                        'pic' => json_decode($API->pic($pic_id, 180)),
-                        'url' => json_decode($API->url($url_id, 120)),
-                        'lyric' => json_decode($API->lyric($lyric_id))
-                    )
-                );
+                if ($API === null) {
+                    $JSON = array('status' => false, 'message' => 'API不可用', 'data' => array());
+                } else {
+                    try {
+                        $JSON = array(
+                            'status' =>  true,
+                            'message' =>  '获取成功',
+                            'data' => array(
+                                'id' => $id,
+                                'pic' => $this->safe_json_decode($API->pic($pic_id, 180)),
+                                'url' => $this->safe_json_decode($API->url($url_id, 120)),
+                                'lyric' => $this->safe_json_decode($API->lyric($lyric_id))
+                            )
+                        );
+                    } catch (Exception $e) {
+                        error_log('WP-Player GetInfo error: ' . $e->getMessage());
+                        $JSON = array('status' => false, 'message' => '获取信息失败', 'data' => array());
+                    }
+                }
             }
 
             header('Content-type: application/json');
@@ -149,7 +218,7 @@ if ( !class_exists( 'wp_player_plugin' ) ){
          * @desc Register setting submit
          */
         public function wp_player_add_link( $action_links, $plugin_file, $plugin_data, $context ){
-            if (strip_tags($plugin_data['Title']) == 'WP-Player') {
+            if (isset($plugin_data['Title']) && strip_tags($plugin_data['Title']) == 'WP-Player') {
                 $wp_player_links = '<a href="'.$this->admin_dir.'" title="设定 WP-Player">设定</a>';
                 array_unshift( $action_links, $wp_player_links );
             }
@@ -163,7 +232,7 @@ if ( !class_exists( 'wp_player_plugin' ) ){
             global $WP_PLAYER_VERSION;
             $options = $this->options;
             wp_enqueue_style( 'wp-player', $this->base_dir . 'assets/css/wp-player.css', array(), $WP_PLAYER_VERSION, 'screen' );
-            if( is_array( $options ) && $options['jQuery'] == 'true' ){
+            if( is_array( $options ) && isset($options['jQuery']) && $options['jQuery'] == 'true' ){
                 wp_enqueue_script( 'jquery' );
             }
             wp_enqueue_script( 'wp-player-jplayer', $this->base_dir . 'assets/js/libs/soundmanager/soundmanager2.js', array(), $WP_PLAYER_VERSION, true );
@@ -202,6 +271,10 @@ if ( !class_exists( 'wp_player_plugin' ) ){
          * @desc string replace
          */
         private function each($str, $isThumb = false) {
+            if (empty($str)) {
+                return '';
+            }
+            
             $arr = explode("\r", $str);
             $text = '';
             if (is_array($arr)) {
@@ -224,6 +297,21 @@ if ( !class_exists( 'wp_player_plugin' ) ){
             global $post;
             
             $result = array();
+            
+            // 检查$post对象是否存在
+            if (!$post || !isset($post->ID)) {
+                $result['source'] = 'xiami';
+                $result['xiami'] = '';
+                $result['title'] = '';
+                $result['author'] = '';
+                $result['file'] = '';
+                $result['thumb'] = '';
+                $result['type'] = '';
+                $result['open'] = 'close';
+                $result['output'] = '';
+                return $result;
+            }
+            
             $source = get_post_meta( $post->ID, 'wp_player_music_type', true );
             
             $result['source'] =  empty($source) ? 'xiami' : $source;
@@ -252,15 +340,19 @@ if ( !class_exists( 'wp_player_plugin' ) ){
         public function wp_player_shortcode( $atts ){
             global $post;
 
-            extract( shortcode_atts( array(
+            $defaults = array(
                 'autoplay' => 0,
                 'random' => 0
-            ), $atts ) );
+            );
+            
+            $atts = shortcode_atts( $defaults, $atts );
+            $autoplay = intval($atts['autoplay']);
+            $random = intval($atts['random']);
 
             $data = $this->get_source();
             $img = $this->base_dir.'assets/images/default.png';
 
-            return '<!--wp-player start--><div class="wp-player" data-wp-player="wp-player" data-source="'.$data['source'].'" data-autoplay="'.$autoplay.'" data-random="'.$random.'" data-type="'.$data['type'].'" data-id="'.$data['xiami'].'" data-title="'.$data['title'].'" data-author="'.$data['author'].'" data-address="'.$data['file'].'" data-thumb="'.$data['thumb'].'" data-lyric="'.$data['open'].'"><div class="wp-player-box"><div class="wp-player-thumb"><img src="'.$img.'" width="90" height="90" alt="" /><div class="wp-player-playing"><span></span></div></div><div class="wp-player-panel"><div class="wp-player-title"></div><div class="wp-player-author"></div><div class="wp-player-progress"><div class="wp-player-seek-bar"><div class="wp-player-play-bar"><span class="wp-player-play-current"></span></div></div></div><div class="wp-player-controls-holder"><div class="wp-player-time"></div><div class="wp-player-controls"><a href="javascript:;" class="wp-player-previous" title="上一首"></a><a href="javascript:;" class="wp-player-play" title="播放"></a><a href="javascript:;" class="wp-player-stop" title="暂停"></a><a href="javascript:;" class="wp-player-next" title="下一首"></a></div>'.$data['output'].'<div class="wp-player-list-btn" title="歌单"></div></div></div></div><div class="wp-player-main"><div class="wp-player-list"><ul></ul></div><div class="wp-player-lyrics"><ul></ul></div></div></div><!--wp-player end-->';
+            return '<!--wp-player start--><div class="wp-player" data-wp-player="wp-player" data-source="'.esc_attr($data['source']).'" data-autoplay="'.esc_attr($autoplay).'" data-random="'.esc_attr($random).'" data-type="'.esc_attr($data['type']).'" data-id="'.esc_attr($data['xiami']).'" data-title="'.esc_attr($data['title']).'" data-author="'.esc_attr($data['author']).'" data-address="'.esc_attr($data['file']).'" data-thumb="'.esc_attr($data['thumb']).'" data-lyric="'.esc_attr($data['open']).'"><div class="wp-player-box"><div class="wp-player-thumb"><img src="'.esc_url($img).'" width="90" height="90" alt="" /><div class="wp-player-playing"><span></span></div></div><div class="wp-player-panel"><div class="wp-player-title"></div><div class="wp-player-author"></div><div class="wp-player-progress"><div class="wp-player-seek-bar"><div class="wp-player-play-bar"><span class="wp-player-play-current"></span></div></div></div><div class="wp-player-controls-holder"><div class="wp-player-time"></div><div class="wp-player-controls"><a href="javascript:;" class="wp-player-previous" title="上一首"></a><a href="javascript:;" class="wp-player-play" title="播放"></a><a href="javascript:;" class="wp-player-stop" title="暂停"></a><a href="javascript:;" class="wp-player-next" title="下一首"></a></div>'.$data['output'].'<div class="wp-player-list-btn" title="歌单"></div></div></div></div><div class="wp-player-main"><div class="wp-player-list"><ul></ul></div><div class="wp-player-lyrics"><ul></ul></div></div></div><!--wp-player end-->';
         }
 
         /**
@@ -291,14 +383,14 @@ if ( !class_exists( 'wp_player_plugin' ) ){
                                     <b>提供了MetaBox来填写参数</b><br />
                                     <ol>
                                         <li>WP-Player 支持网易云音乐, 虾米音乐, QQ音乐, 百度音乐平台</li>
-                                        <li>如在网易云音乐打开喜欢的歌曲页面，复制歌曲页面的网址如：<code>http://music.163.com/#/song?id=191213</code></li>
+                                        <li>如在网易云音乐打开喜欢的歌曲页面，复制歌曲页面的网址如：<code>https://music.163.com/#/song?id=191213</code></li>
                                         <li>并将复制的网址填写到后面的表单内。音乐类型将根据网址自动做出选择。</li>
                                         <li>点击<code>获取音乐ID</code>按钮，此时音乐ID出现在表单中。</li>
                                         <li>将短代码 <code>[player autoplay="1" random="1"]</code> 填入您的文章内容中。</li>
                                         <li>短代码中 <code>autoplay</code> 表示是否自动播放；参数<code>"0"</code>表示否；<code>"1"</code>表示是；</li>
                                         <li>短代码中 <code>random</code> 表示是否随机播放；参数<code>"0"</code>表示否；<code>"1"</code>表示是；</li>
                                         <li>支持播放歌单：单音乐页面、专辑页面、艺人页面、精选集页面。</li>
-                                        <li><code>PS：</code>本插件需要您的服务器或主机支持 PHP 5.4+ and Curl, OpenSSL 模块已安装。</li>
+                                        <li><code>PS：</code>本插件需要您的服务器或主机支持 PHP 8.2+ and Curl, OpenSSL 模块已安装。</li>
                                         <li><code>Tips：</code>本插件仅供个人学习研究使用，请勿作为各种商业用户，音乐版权归各音乐平台所有。</li>
                                     </ol>
                                 </td>
@@ -308,7 +400,7 @@ if ( !class_exists( 'wp_player_plugin' ) ){
                                 <td>
                                     <fieldset>
                                         <label for="wp_player_options[jQuery]">
-                                            <input type="checkbox" id="wp_player_options[jQuery]" name="wp_player_options[jQuery]" value="true" <?php if ( is_array( $options ) && $options['jQuery'] == 'true' ){ echo 'checked="checked"'; } ?> />
+                                            <input type="checkbox" id="wp_player_options[jQuery]" name="wp_player_options[jQuery]" value="true" <?php if ( is_array( $options ) && isset($options['jQuery']) && $options['jQuery'] == 'true' ){ echo 'checked="checked"'; } ?> />
                                             点击选中 jQuery (<small>有些主题以自带jQuery库，如已有则取消此选项</small>)
                                         </label>
                                     </fieldset>						
